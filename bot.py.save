@@ -1,0 +1,80 @@
+import discord
+import requests
+import asyncio
+
+# Configuration
+DISCORD_TOKEN = 'YOUR_DISCORD_BOT_TOKEN'
+HF_TOKEN = 'YOUR_HUGGING_FACE_TOKEN'
+
+# Llama-3-8B is currently the most stable "always-on" model for free users
+API_URL = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
+
+headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+intents = discord.Intents.default()
+intents.message_content = True 
+client = discord.Client(intents=intents)
+
+def query_hf(prompt):
+    payload = {
+        "inputs": f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+        "parameters": {
+            "max_new_tokens": 250,
+            "temperature": 0.6,
+            "stop": ["<|eot_id|>"]
+        },
+        "options": {"wait_for_model": True}
+    }
+    response = requests.post(API_URL, headers=headers, json=payload, timeout=40)
+    return response
+
+@client.event
+async def on_ready():
+    print(f'Logged in as {client.user}')
+    print(f'Using Model: {API_URL}')
+
+@client.event
+async def on_message(message):
+    if message.author == client.user:
+        return
+
+    if message.content.startswith('!ai') or client.user.mentioned_in(message):
+        prompt = message.content.replace('!ai', '').replace(f'<@!{client.user.id}>', '').replace(f'<@{client.user.id}>', '').strip()
+        
+        if not prompt:
+            await message.reply("Yo! Ask me something.")
+            return
+
+        async with message.channel.typing():
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, query_hf, prompt)
+                
+                if response.status_code == 200:
+                    output = response.json()
+                    # Check if output is list or dict
+                    if isinstance(output, list):
+                        reply = output[0].get('generated_text', 'No text.')
+                    else:
+                        reply = output.get('generated_text', 'No text.')
+                    
+                    # Clean up: Llama sometimes returns the full prompt
+                    if "assistant" in reply:
+                        reply = reply.split("assistant")[-1].strip()
+                        
+                    await message.reply(reply)
+                
+                elif response.status_code == 404:
+                    await message.reply("The model Llama-3 is offline. Switching to backup... (Try again in 5 seconds)")
+                    # This tells you in Termux that you need to change the API_URL
+                    print("CRITICAL: Llama-3 returned 404. Try changing API_URL to: https://api-inference.huggingface.co/models/google/gemma-1.1-7b-it")
+                
+                else:
+                    await message.reply(f"API Error {response.status_code}: {response.reason}")
+                    print(f"Server Response: {response.text}")
+
+            except Exception as e:
+                await message.reply(f"System Error: {str(e)}")
+
+client.run(DISCORD_TOKEN)
+
